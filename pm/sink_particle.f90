@@ -2081,8 +2081,9 @@ subroutine update_sink(ilevel)
 
   ! Updating sink positions
 
-  fsink=0
+  fsink=0.0d0
   call f_sink_sink
+  fsink_partial=0.0d0
 
   vsold(1:nsink,1:ndim,ilevel)=vsnew(1:nsink,1:ndim,ilevel)
   vsnew(1:nsink,1:ndim,ilevel)=vsink(1:nsink,1:ndim)
@@ -2214,32 +2215,33 @@ subroutine update_sink_hold(ilevel)
   end do
   
   ! Print all characteristic times for each sink
-  ! if (verbose) then
-  !   do isink=1,nsink
-  !     write(*,*)'Sink ',isink,': ',hold_tsink(isink)
-  !   end do
-  ! endif
+   ! do isink=1,nsink
+   ! write(*,*)'Sink ',isink,': ',hold_tsink(isink)
+   ! end do
 
   hold_mask = .true.
-  hold_evolve(hold_mask, dtnew(ilevel))
+  call hold_evolve(hold_mask, dtnew(ilevel))
 
 end subroutine update_sink_hold
 !##############################################################################
 !##############################################################################
 !##############################################################################
 !##############################################################################
-subroutine hold_evolve(mask, pivot_dt)
+recursive subroutine hold_evolve(mask, pivot_dt)
   use amr_commons
   use pm_commons
   implicit none
 
-  logical,intent(in)::mask(:)
+  logical,intent(in)::mask(nsink)
   real(dp),intent(in)::pivot_dt
   logical::slow_mask(nsink)
   logical::fast_mask(nsink)
 
   integer::isink
   real(dp)::dt
+
+  slow_mask=.false.
+  fast_mask=.false.
 
   do isink=1,nsink
     slow_mask(isink)=mask(isink) .and. (hold_tsink(isink)>=pivot_dt)
@@ -2248,18 +2250,18 @@ subroutine hold_evolve(mask, pivot_dt)
 
   ! Base case: all particles are slow
   if (.not. any(fast_mask)) then
-    hold_drift(mask, pivot_dt/2.0)
-    hold_kick(mask, mask, pivot_dt)
-    hold_drift(mask, pivot_dt/2.0)
-    hold_evolve(fast_mask, pivot_dt/2.0)
+    call hold_drift(mask, pivot_dt/2.0)
+    call hold_kick(mask, mask, pivot_dt)
+    call hold_drift(mask, pivot_dt/2.0)
   ! Recurse if there are fast particles
   else
-    hold_evolve(fast_mask, pivot_dt/2.0)
-    hold_drift(slow_mask, pivot_dt/2.0)
-    hold_kick(slow_mask, slow_mask, pivot_dt)
-    hold_kick(slow_mask, fast_mask, pivot_dt)
-    hold_drift(slow_mask, pivot_dt/2.0)
-    hold_evolve(fast_mask, pivot_dt/2.0)
+    call hold_evolve(fast_mask, pivot_dt/2.0)
+    call hold_drift(slow_mask, pivot_dt/2.0)
+    call hold_kick(slow_mask, slow_mask, pivot_dt)
+    call hold_kick(slow_mask, fast_mask, pivot_dt)
+    call hold_kick(fast_mask, slow_mask, pivot_dt)  ! fast receives force from slow
+    call hold_drift(slow_mask, pivot_dt/2.0)
+    call hold_evolve(fast_mask, pivot_dt/2.0)
   endif
 end subroutine hold_evolve
 !##############################################################################
@@ -2270,8 +2272,10 @@ subroutine hold_drift(mask, dt)
   use amr_commons
   use pm_commons
   implicit none
-  logical,intent(in)::mask(:)
+  logical,intent(in)::mask(nsink)
   real(dp),intent(in)::dt
+
+  integer::isink
 
   do isink=1,nsink
     if (mask(isink)) then
@@ -2288,11 +2292,37 @@ subroutine hold_kick(object_mask, source_mask, dt)
   use amr_commons
   use pm_commons
   implicit none
-  logical,intent(in)::object_mask(:)
-  logical,intent(in)::source_mask(:)
+  logical,intent(in)::object_mask(nsink)
+  logical,intent(in)::source_mask(nsink)
   real(dp),intent(in)::dt
 
-#endif
+  integer::isink,jsink,idim,i
+  real(dp)::r_mag,f_mag,f_vec(1:ndim),r(1:ndim)
+  real(dp)::factG
+
+  factG=1.0d0
+  ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  fsink=0.0d0
+
+  do isink=1,nsink
+    if (object_mask(isink)) then
+      do jsink=1,nsink
+        if (source_mask(jsink).and.(isink.ne.jsink)) then
+          r(1:ndim) = xsink(jsink,1:ndim)-xsink(isink,1:ndim)
+          r_mag = norm2(r(1:ndim))
+          if (r_mag < 1d-10) cycle
+          f_mag = factG * msink(jsink) / r_mag**2
+          f_vec(1:ndim) = f_mag * (r(1:ndim) /r_mag)
+          fsink(isink,1:ndim) = fsink(isink,1:ndim) + f_vec(1:ndim)
+        end if
+      end do
+    end if
+    if (verbose) then
+      write(*,*)'Acceleration on Sink ',isink,': ',fsink(isink,1:ndim)
+    end if
+    vsink(isink,1:ndim) = vsink(isink,1:ndim) + fsink(isink,1:ndim) * dt
+  end do
 end subroutine hold_kick
 !##############################################################################
 !##############################################################################
@@ -2776,7 +2806,9 @@ subroutine f_sink_sink
            ! Compute acceleration
            do jsink=1,nsink
               if (direct_force_sink(jsink))then
-                 ff(jsink,1:ndim)=factG*msink(jsink)/(ssoft**2+d2(jsink))**1.5d0*ff(jsink,1:ndim)
+                 ! Direct Newtonian Force
+                 ff(jsink,1:ndim)=factG*msink(jsink)*(xsink(jsink,1:ndim)-xsink(isink,1:ndim))/(d2(jsink))**1.5d0
+                 ! ff(jsink,1:ndim)=factG*msink(jsink)/(ssoft**2+d2(jsink))**1.5d0*ff(jsink,1:ndim)
               end if
            end do
            do jsink=1,nsink
