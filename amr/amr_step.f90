@@ -1,6 +1,7 @@
 recursive subroutine amr_step(ilevel,icount)
   use amr_commons
   use pm_commons
+  use pm_parameters, only: sink_sink_hold
   use hydro_commons
   use poisson_commons
   use tracer_utils, only: reset_tracer_move_flag
@@ -340,15 +341,25 @@ recursive subroutine amr_step(ilevel,icount)
         dtnew(ilevel+1)=dtnew(ilevel)/dble(nsubcycle(ilevel))
         call update_time(ilevel)
 #if NDIM==3
-      !if(sink)call update_sink(ilevel)
-      if(sink)call update_sink_hold(ilevel)
+      if(sink)then
+         if(sink_sink_hold)then
+            call update_sink_hold(ilevel)
+         else
+            call update_sink(ilevel)
+         endif
+      endif
 #endif
      end if
   else
      call update_time(ilevel)
 #if NDIM==3
-     !if(sink)call update_sink(ilevel)
-     if(sink)call update_sink_hold(ilevel)
+     if(sink)then
+        if(sink_sink_hold)then
+           call update_sink_hold(ilevel)
+        else
+           call update_sink(ilevel)
+        endif
+     endif
 #endif
   end if
 

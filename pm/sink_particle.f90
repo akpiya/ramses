@@ -2083,7 +2083,6 @@ subroutine update_sink(ilevel)
 
   fsink=0.0d0
   call f_sink_sink
-  fsink_partial=0.0d0
 
   vsold(1:nsink,1:ndim,ilevel)=vsnew(1:nsink,1:ndim,ilevel)
   vsnew(1:nsink,1:ndim,ilevel)=vsink(1:nsink,1:ndim)
@@ -2830,6 +2829,7 @@ end subroutine f_sink_sink
 !##############################################################################
 subroutine read_sink_params()
   use pm_commons
+  use pm_parameters
   use amr_commons
   use constants, only: pi,yr2sec
   implicit none
@@ -2840,7 +2840,7 @@ subroutine read_sink_params()
 
   real(dp)::dx_min,scale,cty
   integer::nx_loc
-  namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,merging_timescale,&
+  namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,sink_sink_integrator,merging_timescale,&
        ir_cloud_massive,sink_soft,mass_sink_direct_force,ir_cloud,nsinkmax,create_sinks,&
        check_energies,mass_sink_seed,mass_smbh_seed,c_acc,nlevelmax_sink,&
        eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,&
@@ -2899,6 +2899,9 @@ subroutine read_sink_params()
   ! Check for accretion scheme
   if (accretion_scheme=='bondi')bondi_accretion=.true.
   if (accretion_scheme=='threshold')threshold_accretion=.true.
+
+  ! Check for sink-sink integrator
+  if (sink_sink_integrator=='hold')sink_sink_hold=.true.
 
   ! For sink formation and accretion a threshold must be given
   if (create_sinks .or. (accretion_scheme .ne. 'none'))then
