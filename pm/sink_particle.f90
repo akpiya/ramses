@@ -2081,7 +2081,7 @@ subroutine update_sink(ilevel)
 
   ! Updating sink positions
 
-  fsink=0
+  fsink=0.0
   call f_sink_sink
 
   vsold(1:nsink,1:ndim,ilevel)=vsnew(1:nsink,1:ndim,ilevel)
@@ -2159,6 +2159,170 @@ subroutine update_sink(ilevel)
 
 #endif
 end subroutine update_sink
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine update_sink_hold(ilevel)
+  use amr_commons
+  use pm_commons
+  implicit none
+  integer::ilevel
+
+  integer::isink,jsink
+  real(dp)::v_dot_r,mu,tau
+  real(dp)::free_fall,free_fall_deriv,free_fall_sym
+  real(dp)::fly_by,fly_by_deriv,fly_by_sym
+  real(dp)::r_mag,v_mag
+  real(dp)::factG
+  real(dp)::r(1:ndim)
+  real(dp)::v(1:ndim)
+
+  factG=1d0
+  ! Commented out for now to avoid cosmo dependence
+  ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  hold_tsink = huge(1.0_dp)
+
+  ! Calculate characteristic time for each sink
+  do isink=1,nsink
+   do jsink=isink+1,nsink
+      r(1:ndim)=xsink(isink,1:ndim)-xsink(jsink,1:ndim)
+      v(1:ndim)=vsink(isink,1:ndim)-vsink(jsink,1:ndim)
+      
+      r_mag=norm2(r(1:ndim))
+      v_mag=norm2(v(1:ndim))
+
+      v_dot_r=dot_product(r(1:ndim),v(1:ndim))
+
+      mu=msink(isink)+msink(jsink)
+      
+      free_fall=0.1*sqrt(r_mag**3/(factG*mu))
+      free_fall_deriv = (3 * v_dot_r)*free_fall/(2 * (r_mag ** 2))
+
+      fly_by = 0.1 * r_mag / v_mag
+      fly_by_deriv = (v_dot_r / (r_mag * r_mag)) * fly_by * (1 + factG * mu / (v_mag * v_mag * r_mag))
+
+      free_fall_sym = free_fall / (1 - 0.5 * free_fall_deriv)
+      fly_by_sym = fly_by / (1 - 0.5 * fly_by_deriv)
+
+      tau = min(abs(free_fall_sym), abs(fly_by_sym))
+
+      hold_tsink(isink) = min(hold_tsink(isink), tau)
+      hold_tsink(jsink) = min(hold_tsink(jsink), tau)
+   end do
+  end do
+  
+  ! Print all characteristic times for each sink
+   ! do isink=1,nsink
+   ! write(*,*)'Sink ',isink,': ',hold_tsink(isink)
+   ! end do
+
+  hold_mask = .true.
+  call hold_evolve(hold_mask, dtnew(ilevel))
+
+end subroutine update_sink_hold
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+recursive subroutine hold_evolve(mask, pivot_dt)
+  use amr_commons
+  use pm_commons
+  implicit none
+
+  logical,intent(in)::mask(nsink)
+  real(dp),intent(in)::pivot_dt
+  logical::slow_mask(nsink)
+  logical::fast_mask(nsink)
+
+  integer::isink
+  real(dp)::dt
+
+  slow_mask=.false.
+  fast_mask=.false.
+
+  do isink=1,nsink
+    slow_mask(isink)=mask(isink) .and. (hold_tsink(isink)>=pivot_dt)
+    fast_mask(isink)=mask(isink) .and. (hold_tsink(isink)<pivot_dt)
+  end do
+
+  ! Base case: all particles are slow
+  if (.not. any(fast_mask)) then
+    call hold_drift(mask, pivot_dt/2.0)
+    call hold_kick(mask, mask, pivot_dt)
+    call hold_drift(mask, pivot_dt/2.0)
+  ! Recurse if there are fast particles
+  else
+    call hold_evolve(fast_mask, pivot_dt/2.0)
+    call hold_drift(slow_mask, pivot_dt/2.0)
+    call hold_kick(slow_mask, slow_mask, pivot_dt)
+    call hold_kick(slow_mask, fast_mask, pivot_dt)
+    call hold_kick(fast_mask, slow_mask, pivot_dt)  ! fast receives force from slow
+    call hold_drift(slow_mask, pivot_dt/2.0)
+    call hold_evolve(fast_mask, pivot_dt/2.0)
+  endif
+end subroutine hold_evolve
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_drift(mask, dt)
+  use amr_commons
+  use pm_commons
+  implicit none
+  logical,intent(in)::mask(nsink)
+  real(dp),intent(in)::dt
+
+  integer::isink
+
+  do isink=1,nsink
+    if (mask(isink)) then
+      xsink(isink,1:ndim) = xsink(isink,1:ndim) + vsink(isink,1:ndim) * dt
+    end if
+  end do
+end subroutine hold_drift
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_kick(object_mask, source_mask, dt)
+  ! Kicks the object mask particles with the source mask particles
+  use amr_commons
+  use pm_commons
+  implicit none
+  logical,intent(in)::object_mask(nsink)
+  logical,intent(in)::source_mask(nsink)
+  real(dp),intent(in)::dt
+
+  integer::isink,jsink,idim,i
+  real(dp)::r_mag,f_mag,f_vec(1:ndim),r(1:ndim)
+  real(dp)::factG
+
+  factG=1.0d0
+  ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  fsink=0.0d0
+
+  do isink=1,nsink
+    if (object_mask(isink)) then
+      do jsink=1,nsink
+        if (source_mask(jsink).and.(isink.ne.jsink)) then
+          r(1:ndim) = xsink(jsink,1:ndim)-xsink(isink,1:ndim)
+          r_mag = norm2(r(1:ndim))
+          if (r_mag < 1d-10) cycle
+          f_mag = factG * msink(jsink) / r_mag**2
+          f_vec(1:ndim) = f_mag * (r(1:ndim) /r_mag)
+          fsink(isink,1:ndim) = fsink(isink,1:ndim) + f_vec(1:ndim)
+        end if
+      end do
+    end if
+    if (verbose) then
+      write(*,*)'Acceleration on Sink ',isink,': ',fsink(isink,1:ndim)
+    end if
+    vsink(isink,1:ndim) = vsink(isink,1:ndim) + fsink(isink,1:ndim) * dt
+  end do
+end subroutine hold_kick
 !##############################################################################
 !##############################################################################
 !##############################################################################
@@ -2663,6 +2827,7 @@ end subroutine f_sink_sink
 !##############################################################################
 subroutine read_sink_params()
   use pm_commons
+  use pm_parameters
   use amr_commons
   use constants, only: pi,yr2sec
   implicit none
@@ -2673,7 +2838,7 @@ subroutine read_sink_params()
 
   real(dp)::dx_min,scale,cty
   integer::nx_loc
-  namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,merging_timescale,&
+  namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,sink_sink_integrator,merging_timescale,&
        ir_cloud_massive,sink_soft,mass_sink_direct_force,ir_cloud,nsinkmax,create_sinks,&
        check_energies,mass_sink_seed,mass_smbh_seed,c_acc,nlevelmax_sink,&
        eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,&
@@ -2732,6 +2897,9 @@ subroutine read_sink_params()
   ! Check for accretion scheme
   if (accretion_scheme=='bondi')bondi_accretion=.true.
   if (accretion_scheme=='threshold')threshold_accretion=.true.
+
+  ! Check for sink-sink integrator
+  if (sink_sink_integrator=='hold')sink_sink_hold=.true.
 
   ! For sink formation and accretion a threshold must be given
   if (create_sinks .or. (accretion_scheme .ne. 'none'))then

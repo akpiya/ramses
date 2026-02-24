@@ -31,8 +31,10 @@ module pm_parameters
   real(dp)::cont_speed=0                     ! Clump contraction rate
 
   character(LEN=15)::accretion_scheme='none' ! Sink accretion scheme; options: 'none', 'bondi', 'threshold'
+  character(LEN=15)::sink_sink_integrator='plummer' ! Sink-sink integrator; options: 'plummer', 'hold', (future: ...)
   logical::threshold_accretion=.false.       ! NOT A NAMELIST PARAMETER
   logical::bondi_accretion=.false.           ! NOT A NAMELIST PARAMETER
+  logical::sink_sink_hold=.false.            ! NOT A NAMELIST PARAMETER; set from sink_sink_integrator
   logical::bondi_use_vrel=.true.             ! Use v_rel^2 in the denominator of Bondi formula
   real(dp)::c_acc=0.75                       ! "courant factor" for sink accretion
                                              ! gives fraction of available gas that can be accreted in one timestep
