@@ -2081,7 +2081,7 @@ subroutine update_sink(ilevel)
 
   ! Updating sink positions
 
-  fsink=0.0d0
+  fsink=0.0
   call f_sink_sink
 
   vsold(1:nsink,1:ndim,ilevel)=vsnew(1:nsink,1:ndim,ilevel)
@@ -2805,9 +2805,7 @@ subroutine f_sink_sink
            ! Compute acceleration
            do jsink=1,nsink
               if (direct_force_sink(jsink))then
-                 ! Direct Newtonian Force
-                 ff(jsink,1:ndim)=factG*msink(jsink)*(xsink(jsink,1:ndim)-xsink(isink,1:ndim))/(d2(jsink))**1.5d0
-                 ! ff(jsink,1:ndim)=factG*msink(jsink)/(ssoft**2+d2(jsink))**1.5d0*ff(jsink,1:ndim)
+                 ff(jsink,1:ndim)=factG*msink(jsink)/(ssoft**2+d2(jsink))**1.5d0*ff(jsink,1:ndim)
               end if
            end do
            do jsink=1,nsink
