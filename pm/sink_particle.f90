@@ -2168,8 +2168,7 @@ subroutine update_sink_hold(ilevel)
   use pm_commons
   implicit none
   integer::ilevel
-
-  integer::isink,jsink
+  integer::isink,jsink,lev
   real(dp)::v_dot_r,mu,tau
   real(dp)::free_fall,free_fall_deriv,free_fall_sym
   real(dp)::fly_by,fly_by_deriv,fly_by_sym
@@ -2181,6 +2180,19 @@ subroutine update_sink_hold(ilevel)
   factG=1d0
   ! Commented out for now to avoid cosmo dependence
   ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  ! Build PM/PIC+gas acceleration for all sinks from fsink_partial
+  fsink(1:nsink,1:ndim)=0.0d0
+  do isink=1,nsink
+     if(msink(isink)>0.0)then
+        do lev=levelmin,nlevelmax
+           fsink(isink,1:ndim)=fsink(isink,1:ndim)+fsink_partial(isink,1:ndim,lev)
+        end do
+        if (.not. direct_force_sink(isink))then
+           fsink(isink,1:ndim)=fsink(isink,1:ndim)/dble(ncloud_sink)
+        end if
+     end if
+  end do
 
   hold_tsink = huge(1.0_dp)
 
@@ -2298,16 +2310,20 @@ subroutine hold_kick(object_mask, source_mask, dt)
   integer::isink,jsink,idim,i
   real(dp)::r_mag,f_mag,f_vec(1:ndim),r(1:ndim)
   real(dp)::factG
+  real(dp)::fsink_pm(1:nsink,1:ndim)
 
   factG=1.0d0
   ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
 
-  fsink=0.0d0
+  ! Store PM/PIC+gas contribution and reset working array for N-body term
+  fsink_pm(1:nsink,1:ndim)=fsink(1:nsink,1:ndim)
+  fsink(1:nsink,1:ndim)=0.0d0
 
+  ! Compute direct N-body contribution between direct-force sinks
   do isink=1,nsink
-    if (object_mask(isink)) then
+    if (object_mask(isink) .and. direct_force_sink(isink)) then
       do jsink=1,nsink
-        if (source_mask(jsink).and.(isink.ne.jsink)) then
+        if (source_mask(jsink).and.direct_force_sink(jsink).and.(isink.ne.jsink)) then
           r(1:ndim) = xsink(jsink,1:ndim)-xsink(isink,1:ndim)
           r_mag = norm2(r(1:ndim))
           if (r_mag < 1d-10) cycle
@@ -2317,10 +2333,14 @@ subroutine hold_kick(object_mask, source_mask, dt)
         end if
       end do
     end if
-    if (verbose) then
-      write(*,*)'Acceleration on Sink ',isink,': ',fsink(isink,1:ndim)
+  end do
+
+  ! Apply total acceleration: PM/PIC+gas for all sinks, plus N-body for direct-force sinks
+  do isink=1,nsink
+    if (object_mask(isink)) then
+      f_vec(1:ndim)=fsink_pm(isink,1:ndim)+fsink(isink,1:ndim)
+      vsink(isink,1:ndim) = vsink(isink,1:ndim) + f_vec(1:ndim) * dt
     end if
-    vsink(isink,1:ndim) = vsink(isink,1:ndim) + fsink(isink,1:ndim) * dt
   end do
 end subroutine hold_kick
 !##############################################################################
