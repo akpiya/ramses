@@ -103,13 +103,14 @@ eps_star=1e-10
 /
 
 &SINK_PARAMS
+sink_sink_integrator='hold'
 smbh=.true.
 agn=.false.
 create_sinks=.false.
 nsinkmax=1
 mass_sink_seed=1.0d6 ! in M_sun
 mass_smbh_seed=0
-mass_sink_direct_force=1.0 ! in M_sun
+mass_sink_direct_force=0.0 ! in M_sun
 accretion_scheme='bondi'
 eddington_limit=.true.
 acc_sink_boost=1.0 ! 1 is no boost

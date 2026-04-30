@@ -1920,6 +1920,7 @@ end subroutine true_max
 subroutine update_sink(ilevel)
   use amr_commons
   use pm_commons
+  use pm_parameters, only: allow_sink_merging
   use hydro_commons
   use sink_feedback_parameters
   use constants, only: twopi, M_sun, yr2sec
@@ -2004,7 +2005,7 @@ subroutine update_sink(ilevel)
                  merge_flag=merge_flag .and. (iyoung .or. jyoung)
               end if
 
-              if (merge_flag.eqv..true.)then
+              if (allow_sink_merging .and. merge_flag.eqv..true.)then
 
                  if(myid==1)then
                     write(*,*)'> Merging sink ',idsink(jsink),' into sink ',idsink(isink)
@@ -2861,7 +2862,7 @@ subroutine read_sink_params()
   namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,sink_sink_integrator,merging_timescale,&
        ir_cloud_massive,sink_soft,mass_sink_direct_force,ir_cloud,nsinkmax,create_sinks,&
        check_energies,mass_sink_seed,mass_smbh_seed,c_acc,nlevelmax_sink,&
-       eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,&
+       eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,allow_sink_merging,&
        clump_core,verbose_AGN,T2_AGN,T2_min,cone_opening,mass_halo_AGN,mass_clump_AGN,mass_star_AGN,&
        AGN_fbk_frac_ener,AGN_fbk_frac_mom,T2_max,v_max,boost_threshold_density,&
        epsilon_kin,AGN_fbk_mode_switch_threshold,kin_mass_loading,bondi_use_vrel,smbh,agn,max_mass_nsc,&
