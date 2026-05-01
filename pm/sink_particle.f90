@@ -2184,10 +2184,306 @@ subroutine update_sink_hold(ilevel)
      end if
   end do
 
+  call hold_prepare_clean_field(ilevel)
+  call hold_build_interpolated_force_samples(ilevel)
+
+  ! --- DEBUG: compare fsink vs interpolated force at original position ---
+  do isink=1,nsink
+     if(msink(isink)>0.0d0)then
+        block
+           real(dp)::dbg_acc(1:ndim)
+           call hold_interpolate_pm_force(isink,dbg_acc)
+           if(myid==1)then
+              write(*,'(A,I3,A,I4,A,3ES14.6)') &
+                   ' [HOLD DBG] sink',isink,' nsamples=',hold_interp_count(isink), &
+                   ' fsink=',fsink(isink,1:ndim)
+              write(*,'(A,I3,A,3ES14.6)') &
+                   ' [HOLD DBG] sink',isink,' interp=',dbg_acc(1:ndim)
+           end if
+        end block
+     end if
+  end do
+  ! --- END DEBUG ---
+
   hold_mask = .true.
   call hold_evolve(hold_mask, dtnew(ilevel))
 
 end subroutine update_sink_hold
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_prepare_clean_field(ilevel)
+  ! Copy f → f_hold for cells at ilevel, then subtract the Plummer
+  ! contribution that f_gas_sink deposited for each direct-force sink.
+  ! After this, f_hold contains the Poisson (gas/DM) field only.
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  use constants, only: twopi
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer ::igrid,ngrid,ncache,i,ind,iskip,ix,iy,iz,isink
+  integer ::nx_loc,idim
+  real(dp)::dx,dx_loc,scale,dx_min,factG
+  real(dp),dimension(1:twotondim,1:ndim)::xc
+  real(dp),dimension(1:ndim)::skip_loc
+  integer ,dimension(1:nvector)::ind_grid,ind_cell
+  real(dp),dimension(1:nvector,1:ndim)::xx,ff
+  real(dp),dimension(1:nvector)::d2,denom
+  logical ,dimension(1:ndim)::period
+
+#if NDIM==3
+
+  factG=1d0
+  if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  skip_loc=(/0.0d0,0.0d0,0.0d0/)
+  skip_loc(1)=dble(icoarse_min)
+  skip_loc(2)=dble(jcoarse_min)
+  skip_loc(3)=dble(kcoarse_min)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx_min=scale*0.5D0**nlevelmax_sink/aexp
+
+  do ind=1,twotondim
+     iz=(ind-1)/4
+     iy=(ind-1-4*iz)/2
+     ix=(ind-1-2*iy-4*iz)
+     xc(ind,1)=(dble(ix)-0.5D0)*dx
+     xc(ind,2)=(dble(iy)-0.5D0)*dx
+     xc(ind,3)=(dble(iz)-0.5D0)*dx
+  end do
+
+  period(1)=(nx==1)
+  period(2)=(ny==1)
+  period(3)=(nz==1)
+
+  ncache=active(ilevel)%ngrid
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell(i)=iskip+ind_grid(i)
+        end do
+
+        ! Copy f → f_hold
+        do idim=1,ndim
+           do i=1,ngrid
+              f_hold(ind_cell(i),idim)=f(ind_cell(i),idim)
+           end do
+        end do
+
+        ! Subtract each direct-force sink's Plummer contribution
+        do isink=1,nsink
+           if(.not. direct_force_sink(isink))cycle
+           if(msink(isink)<=0.0d0)cycle
+
+           do idim=1,ndim
+              do i=1,ngrid
+                 xx(i,idim)=(xg(ind_grid(i),idim)+xc(ind,idim)-skip_loc(idim))*scale
+              end do
+           end do
+
+           d2=0d0
+           do idim=1,ndim
+              do i=1,ngrid
+                 ff(i,idim)=xsink(isink,idim)-xx(i,idim)
+                 if(period(idim))then
+                    if(ff(i,idim)>0.5d0*boxlen)ff(i,idim)=ff(i,idim)-boxlen
+                    if(ff(i,idim)<-0.5d0*boxlen)ff(i,idim)=ff(i,idim)+boxlen
+                 end if
+                 d2(i)=d2(i)+ff(i,idim)**2
+              end do
+           end do
+
+           do i=1,ngrid
+              denom(i)=(ssoft**2+d2(i))**(-1.5d0)
+           end do
+
+           do i=1,ngrid
+              ff(i,1:ndim)=denom(i)*ff(i,1:ndim)
+           end do
+
+           do i=1,ngrid
+              f_hold(ind_cell(i),1:ndim)=f_hold(ind_cell(i),1:ndim) &
+                   -factG*msink(isink)*ff(i,1:ndim)
+           end do
+        end do ! end loop over sinks
+     end do ! end loop over cells in grid
+  end do ! end loop over grids
+
+#endif
+
+end subroutine hold_prepare_clean_field
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_build_interpolated_force_samples(ilevel)
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::icpu,ncache,istart,igrid,jgrid,ipart,jpart,next_part,npart1
+  integer::ig,ip,isink
+  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
+
+  hold_interp_count(1:nsink)=0
+  hold_interp_valid(1:nsink)=.false.
+
+  if(numbtot(1,ilevel)==0)return
+
+  do icpu=1,ncpu+nboundary
+     if(icpu<=ncpu)then
+        ncache=numbl(icpu,ilevel)
+        istart=headl(icpu,ilevel)
+     else
+        ncache=numbb(icpu-ncpu,ilevel)
+        istart=headb(icpu-ncpu,ilevel)
+     end if
+     igrid=istart
+     ig=0
+     ip=0
+     do jgrid=1,ncache
+        npart1=numbp(igrid)
+        if(npart1>0)then
+           ig=ig+1
+           ind_grid(ig)=igrid
+           ipart=headp(igrid)
+           do jpart=1,npart1
+              next_part=nextp(ipart)
+              if(ig==0)then
+                 ig=1
+                 ind_grid(ig)=igrid
+              end if
+              if(is_cloud(typep(ipart)))then
+                 isink=-idp(ipart)
+                 if(isink>=1 .and. isink<=nsink)then
+                    if(msink(isink)>0.0d0)then
+                       ip=ip+1
+                       ind_part(ip)=ipart
+                       ind_grid_part(ip)=ig
+                       if(ip==nvector)then
+                          call hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+                          ip=0
+                          ig=0
+                       end if
+                    end if
+                 end if
+              end if
+              ipart=next_part
+           end do
+        end if
+        igrid=next(igrid)
+     end do
+     if(ip>0)then
+        call hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+     end if
+  end do
+
+  do isink=1,nsink
+     if(msink(isink)>0.0d0)then
+        hold_interp_valid(isink)=(hold_interp_count(isink)>0)
+     end if
+  end do
+end subroutine hold_build_interpolated_force_samples
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ng,np,ilevel
+  integer,dimension(1:nvector),intent(in)::ind_grid,ind_part,ind_grid_part
+  integer::j,ind,idim,isink,slot
+  real(dp)::ff(1:ndim)
+  real(dp),dimension(1:nvector,1:ndim),save::xpart
+  integer ,dimension(1:nvector,1:twotondim),save::indp
+  real(dp),dimension(1:nvector,1:ndim,1:twotondim)::xx
+  real(dp),dimension(1:nvector,1:twotondim)::vol
+  logical,dimension(1:nvector,1:twotondim)::ok
+
+  do idim=1,ndim
+     do j=1,np
+        xpart(j,idim)=xp(ind_part(j),idim)
+     end do
+  end do
+
+  call cic_get_cells(indp,xx,vol,ok,ind_grid,xpart,ind_grid_part,ng,np,ilevel)
+
+  do j=1,np
+     isink=-idp(ind_part(j))
+     if(isink<1 .or. isink>nsink)cycle
+     if(msink(isink)<=0.0d0)cycle
+
+     ! CIC-sample from f_hold (Plummer already subtracted at grid level)
+     ff(1:ndim)=0.0d0
+     do ind=1,twotondim
+        if(ok(j,ind))then
+           do idim=1,ndim
+              ff(idim)=ff(idim)+f_hold(indp(j,ind),idim)*vol(j,ind)
+           end do
+        end if
+     end do
+
+     slot=hold_interp_count(isink)+1
+     if(slot<=ncloud_sink)then
+        hold_interp_pos(isink,slot,1:ndim)=xpart(j,1:ndim)
+        hold_interp_force(isink,slot,1:ndim)=ff(1:ndim)
+        hold_interp_count(isink)=slot
+     end if
+  end do
+end subroutine hold_accumulate_interp_samples_np
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_interpolate_pm_force(isink,acc_pm)
+  use amr_commons
+  use pm_commons
+  implicit none
+  integer,intent(in)::isink
+  real(dp),intent(out)::acc_pm(1:ndim)
+  integer::k,n
+  real(dp)::dx(1:ndim),r2,w,wsum
+  real(dp),parameter::eps2=1.0d-24
+
+  n=hold_interp_count(isink)
+  if((.not. hold_interp_valid(isink)) .or. n<=0)then
+     acc_pm(1:ndim)=fsink(isink,1:ndim)
+     return
+  end if
+
+  ! Inverse-distance-squared weighted interpolation
+  acc_pm(1:ndim)=0.0d0
+  wsum=0.0d0
+  do k=1,n
+     dx(1:ndim)=xsink(isink,1:ndim)-hold_interp_pos(isink,k,1:ndim)
+     r2=sum(dx(1:ndim)**2)
+     w=1.0d0/(r2+eps2)
+     acc_pm(1:ndim)=acc_pm(1:ndim)+w*hold_interp_force(isink,k,1:ndim)
+     wsum=wsum+w
+  end do
+
+  if(wsum>0.0d0)then
+     acc_pm(1:ndim)=acc_pm(1:ndim)/wsum
+  else
+     acc_pm(1:ndim)=fsink(isink,1:ndim)
+  end if
+end subroutine hold_interpolate_pm_force
 !##############################################################################
 !##############################################################################
 !##############################################################################
@@ -2348,7 +2644,7 @@ subroutine hold_kick(object_mask, source_mask, dt, include_pm)
     if (.not. object_mask(isink)) cycle
 
     acc_pm(1:ndim)=0.0d0
-    if (include_pm) acc_pm(1:ndim)=fsink(isink,1:ndim)
+    if (include_pm) call hold_interpolate_pm_force(isink,acc_pm)
 
     acc_nb(1:ndim)=0.0d0
     if (object_mask(isink) .and. direct_force_sink(isink)) then
