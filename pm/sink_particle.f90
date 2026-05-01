@@ -2169,18 +2169,7 @@ subroutine update_sink_hold(ilevel)
   use pm_commons
   implicit none
   integer::ilevel
-  integer::isink,jsink,lev
-  real(dp)::v_dot_r,mu,tau
-  real(dp)::free_fall,free_fall_deriv,free_fall_sym
-  real(dp)::fly_by,fly_by_deriv,fly_by_sym
-  real(dp)::r_mag,v_mag
-  real(dp)::factG
-  real(dp)::r(1:ndim)
-  real(dp)::v(1:ndim)
-
-  factG=1d0
-  ! Commented out for now to avoid cosmo dependence
-  ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+  integer::isink,lev
 
   ! Build PM/PIC+gas acceleration for all sinks from fsink_partial
   fsink(1:nsink,1:ndim)=0.0d0
@@ -2195,46 +2184,81 @@ subroutine update_sink_hold(ilevel)
      end if
   end do
 
-  hold_tsink = huge(1.0_dp)
-
-  ! Calculate characteristic time for each sink
-  do isink=1,nsink
-   do jsink=isink+1,nsink
-      r(1:ndim)=xsink(isink,1:ndim)-xsink(jsink,1:ndim)
-      v(1:ndim)=vsink(isink,1:ndim)-vsink(jsink,1:ndim)
-      
-      r_mag=norm2(r(1:ndim))
-      v_mag=norm2(v(1:ndim))
-
-      v_dot_r=dot_product(r(1:ndim),v(1:ndim))
-
-      mu=msink(isink)+msink(jsink)
-      
-      free_fall=0.1*sqrt(r_mag**3/(factG*mu))
-      free_fall_deriv = (3 * v_dot_r)*free_fall/(2 * (r_mag ** 2))
-
-      fly_by = 0.1 * r_mag / v_mag
-      fly_by_deriv = (v_dot_r / (r_mag * r_mag)) * fly_by * (1 + factG * mu / (v_mag * v_mag * r_mag))
-
-      free_fall_sym = free_fall / (1 - 0.5 * free_fall_deriv)
-      fly_by_sym = fly_by / (1 - 0.5 * fly_by_deriv)
-
-      tau = min(abs(free_fall_sym), abs(fly_by_sym))
-
-      hold_tsink(isink) = min(hold_tsink(isink), tau)
-      hold_tsink(jsink) = min(hold_tsink(jsink), tau)
-   end do
-  end do
-  
-  ! Print all characteristic times for each sink
-   ! do isink=1,nsink
-   ! write(*,*)'Sink ',isink,': ',hold_tsink(isink)
-   ! end do
-
   hold_mask = .true.
   call hold_evolve(hold_mask, dtnew(ilevel))
 
 end subroutine update_sink_hold
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_compute_characteristic_times()
+  use amr_commons
+  use pm_commons
+  implicit none
+
+  integer::isink,jsink
+  real(dp)::v_dot_r,mu,tau
+  real(dp)::free_fall,free_fall_deriv,free_fall_sym
+  real(dp)::fly_by,fly_by_deriv,fly_by_sym
+  real(dp)::r_mag,v_mag
+  real(dp)::r_mag_safe,v_mag_safe
+  real(dp)::den_ff,den_fb
+  real(dp)::factG
+  real(dp)::r(1:ndim)
+  real(dp)::v(1:ndim)
+  real(dp),parameter::eps=1d-12
+
+  factG=1d0
+  ! Commented out for now to avoid cosmo dependence
+  ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  hold_tsink = huge(1.0_dp)
+
+  do isink=1,nsink
+    do jsink=isink+1,nsink
+      if (msink(isink)<=0.0d0 .or. msink(jsink)<=0.0d0) cycle
+
+      r(1:ndim)=xsink(isink,1:ndim)-xsink(jsink,1:ndim)
+      v(1:ndim)=vsink(isink,1:ndim)-vsink(jsink,1:ndim)
+
+      r_mag=norm2(r(1:ndim))
+      v_mag=norm2(v(1:ndim))
+      r_mag_safe=max(r_mag,eps)
+      v_mag_safe=max(v_mag,eps)
+
+      v_dot_r=dot_product(r(1:ndim),v(1:ndim))
+      mu=msink(isink)+msink(jsink)
+      if (mu<=0.0d0) cycle
+
+      free_fall=0.1d0*sqrt((r_mag_safe**3)/(factG*mu))
+      free_fall_deriv=(3.0d0*v_dot_r)*free_fall/(2.0d0*(r_mag_safe**2))
+
+      fly_by=0.1d0*r_mag_safe/v_mag_safe
+      fly_by_deriv=(v_dot_r/(r_mag_safe*r_mag_safe))*fly_by * &
+           (1.0d0 + factG*mu/(v_mag_safe*v_mag_safe*r_mag_safe))
+
+      den_ff=1.0d0-0.5d0*free_fall_deriv
+      den_fb=1.0d0-0.5d0*fly_by_deriv
+      if (den_ff>eps) then
+        free_fall_sym=free_fall/den_ff
+      else
+        free_fall_sym=free_fall
+      end if
+      if (den_fb>eps) then
+        fly_by_sym=fly_by/den_fb
+      else
+        fly_by_sym=fly_by
+      end if
+
+      tau=min(free_fall_sym,fly_by_sym)
+      if (.not.(tau>0.0d0) .or. tau/=tau) tau=huge(1.0_dp)
+
+      hold_tsink(isink)=min(hold_tsink(isink),tau)
+      hold_tsink(jsink)=min(hold_tsink(jsink),tau)
+    end do
+  end do
+end subroutine hold_compute_characteristic_times
 !##############################################################################
 !##############################################################################
 !##############################################################################
@@ -2250,10 +2274,11 @@ recursive subroutine hold_evolve(mask, pivot_dt)
   logical::fast_mask(nsink)
 
   integer::isink
-  real(dp)::dt
 
   slow_mask=.false.
   fast_mask=.false.
+
+  call hold_compute_characteristic_times()
 
   do isink=1,nsink
     slow_mask(isink)=mask(isink) .and. (hold_tsink(isink)>=pivot_dt)
@@ -2263,15 +2288,15 @@ recursive subroutine hold_evolve(mask, pivot_dt)
   ! Base case: all particles are slow
   if (.not. any(fast_mask)) then
     call hold_drift(mask, pivot_dt/2.0)
-    call hold_kick(mask, mask, pivot_dt)
+    call hold_kick(mask, mask, pivot_dt, .true.)
     call hold_drift(mask, pivot_dt/2.0)
   ! Recurse if there are fast particles
   else
     call hold_evolve(fast_mask, pivot_dt/2.0)
     call hold_drift(slow_mask, pivot_dt/2.0)
-    call hold_kick(slow_mask, slow_mask, pivot_dt)
-    call hold_kick(slow_mask, fast_mask, pivot_dt)
-    call hold_kick(fast_mask, slow_mask, pivot_dt)  ! fast receives force from slow
+    call hold_kick(slow_mask, slow_mask, pivot_dt, .true.)
+    call hold_kick(slow_mask, fast_mask, pivot_dt, .false.)
+    call hold_kick(fast_mask, slow_mask, pivot_dt, .false.)  ! fast receives force from slow
     call hold_drift(slow_mask, pivot_dt/2.0)
     call hold_evolve(fast_mask, pivot_dt/2.0)
   endif
@@ -2299,29 +2324,33 @@ end subroutine hold_drift
 !##############################################################################
 !##############################################################################
 !##############################################################################
-subroutine hold_kick(object_mask, source_mask, dt)
+subroutine hold_kick(object_mask, source_mask, dt, include_pm)
   ! Kicks the object mask particles with the source mask particles
   use amr_commons
   use pm_commons
   implicit none
   logical,intent(in)::object_mask(nsink)
   logical,intent(in)::source_mask(nsink)
+  logical,intent(in)::include_pm
   real(dp),intent(in)::dt
 
-  integer::isink,jsink,idim,i
+  integer::isink,jsink
   real(dp)::r_mag,f_mag,f_vec(1:ndim),r(1:ndim)
   real(dp)::factG
-  real(dp)::fsink_pm(1:nsink,1:ndim)
+  real(dp)::acc_pm(1:ndim)
+  real(dp)::acc_nb(1:ndim)
 
   factG=1.0d0
   ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
 
-  ! Store PM/PIC+gas contribution and reset working array for N-body term
-  fsink_pm(1:nsink,1:ndim)=fsink(1:nsink,1:ndim)
-  fsink(1:nsink,1:ndim)=0.0d0
-
   ! Compute direct N-body contribution between direct-force sinks
   do isink=1,nsink
+    if (.not. object_mask(isink)) cycle
+
+    acc_pm(1:ndim)=0.0d0
+    if (include_pm) acc_pm(1:ndim)=fsink(isink,1:ndim)
+
+    acc_nb(1:ndim)=0.0d0
     if (object_mask(isink) .and. direct_force_sink(isink)) then
       do jsink=1,nsink
         if (source_mask(jsink).and.direct_force_sink(jsink).and.(isink.ne.jsink)) then
@@ -2330,18 +2359,13 @@ subroutine hold_kick(object_mask, source_mask, dt)
           if (r_mag < 1d-10) cycle
           f_mag = factG * msink(jsink) / r_mag**2
           f_vec(1:ndim) = f_mag * (r(1:ndim) /r_mag)
-          fsink(isink,1:ndim) = fsink(isink,1:ndim) + f_vec(1:ndim)
+          acc_nb(1:ndim) = acc_nb(1:ndim) + f_vec(1:ndim)
         end if
       end do
     end if
-  end do
 
-  ! Apply total acceleration: PM/PIC+gas for all sinks, plus N-body for direct-force sinks
-  do isink=1,nsink
-    if (object_mask(isink)) then
-      f_vec(1:ndim)=fsink_pm(isink,1:ndim)+fsink(isink,1:ndim)
-      vsink(isink,1:ndim) = vsink(isink,1:ndim) + f_vec(1:ndim) * dt
-    end if
+    ! Apply total acceleration: optional PM/PIC+gas term plus direct N-body term.
+    vsink(isink,1:ndim) = vsink(isink,1:ndim) + (acc_pm(1:ndim)+acc_nb(1:ndim)) * dt
   end do
 end subroutine hold_kick
 !##############################################################################
