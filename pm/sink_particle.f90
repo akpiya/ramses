@@ -2187,24 +2187,6 @@ subroutine update_sink_hold(ilevel)
   call hold_prepare_clean_field(ilevel)
   call hold_build_interpolated_force_samples(ilevel)
 
-  ! --- DEBUG: compare fsink vs interpolated force at original position ---
-  do isink=1,nsink
-     if(msink(isink)>0.0d0)then
-        block
-           real(dp)::dbg_acc(1:ndim)
-           call hold_interpolate_pm_force(isink,dbg_acc)
-           if(myid==1)then
-              write(*,'(A,I3,A,I4,A,3ES14.6)') &
-                   ' [HOLD DBG] sink',isink,' nsamples=',hold_interp_count(isink), &
-                   ' fsink=',fsink(isink,1:ndim)
-              write(*,'(A,I3,A,3ES14.6)') &
-                   ' [HOLD DBG] sink',isink,' interp=',dbg_acc(1:ndim)
-           end if
-        end block
-     end if
-  end do
-  ! --- END DEBUG ---
-
   hold_mask = .true.
   call hold_evolve(hold_mask, dtnew(ilevel))
 
