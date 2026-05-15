@@ -105,13 +105,13 @@ subroutine dump_all
 #endif
   if(myid==1.and.print_when_io) write(*,*)'End backup info etc.'
 
-  if(myid==1.and.print_when_io) write(*,*)'Start backup amr'
-  filename=TRIM(filedir)//'amr_'//TRIM(nchar)//'.out'
-  call backup_amr(filename)
-#ifndef WITHOUTMPI
-  if(synchro_when_io) call MPI_BARRIER(MPI_COMM_WORLD,info)
-#endif
-  if(myid==1.and.print_when_io) write(*,*)'End backup amr'
+!  if(myid==1.and.print_when_io) write(*,*)'Start backup amr'
+!  filename=TRIM(filedir)//'amr_'//TRIM(nchar)//'.out'
+!  call backup_amr(filename)
+!#ifndef WITHOUTMPI
+!  if(synchro_when_io) call MPI_BARRIER(MPI_COMM_WORLD,info)
+!#endif
+!  if(myid==1.and.print_when_io) write(*,*)'End backup amr'
 
   if(hydro)then
      if(myid==1.and.print_when_io) write(*,*)'Start backup hydro'
