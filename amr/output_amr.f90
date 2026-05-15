@@ -137,16 +137,16 @@ subroutine dump_all
   endif
 #endif
 
-  if(pic)then
-     if(myid==1.and.print_when_io) write(*,*)'Start backup part'
-     filename=trim(filedir)//'part_'//trim(nchar)//'.out'
-     filename_desc=TRIM(filedir)//'part_file_descriptor.txt'
-     call backup_part(filename, filename_desc)
-#ifndef WITHOUTMPI
-     if(synchro_when_io) call MPI_BARRIER(MPI_COMM_WORLD,info)
-#endif
-     if(myid==1.and.print_when_io) write(*,*)'End backup part'
-  end if
+!  if(pic)then
+!     if(myid==1.and.print_when_io) write(*,*)'Start backup part'
+!     filename=trim(filedir)//'part_'//trim(nchar)//'.out'
+!     filename_desc=TRIM(filedir)//'part_file_descriptor.txt'
+!     call backup_part(filename, filename_desc)
+!#ifndef WITHOUTMPI
+!     if(synchro_when_io) call MPI_BARRIER(MPI_COMM_WORLD,info)
+!#endif
+!     if(myid==1.and.print_when_io) write(*,*)'End backup part'
+!  end if
 
   if(poisson)then
      if(myid==1.and.print_when_io) write(*,*)'Start backup poisson'
