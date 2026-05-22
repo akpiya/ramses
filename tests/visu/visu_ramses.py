@@ -727,5 +727,7 @@ def check_solution(data,test_name,tolerance=None,threshold=2.0e-14,norm_min=1.0e
     # Print message if successful
     if ok:
         print("PASSED")
+    else:
+        print("FAILED")
 
     return

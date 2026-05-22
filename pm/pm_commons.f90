@@ -33,6 +33,11 @@ module pm_commons
   real(dp),allocatable,dimension(:)    ::rho_sink_tff
   real(dp),allocatable,dimension(:)    ::msum_overlap
   real(dp),allocatable,dimension(:)    ::hold_tsink
+  real(dp),allocatable,dimension(:,:,:)::hold_interp_pos
+  real(dp),allocatable,dimension(:,:,:)::hold_interp_force
+  integer,allocatable,dimension(:)     ::hold_interp_count
+  logical,allocatable,dimension(:)     ::hold_interp_valid
+  real(dp),allocatable,dimension(:,:)  ::f_hold
   integer,allocatable,dimension(:)     ::idsink,idsink_new,idsink_old,idsink_all
   logical,allocatable,dimension(:)     ::ok_blast_agn,ok_blast_agn_all
   logical,allocatable,dimension(:)     ::direct_force_sink

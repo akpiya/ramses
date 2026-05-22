@@ -1920,6 +1920,7 @@ end subroutine true_max
 subroutine update_sink(ilevel)
   use amr_commons
   use pm_commons
+  use pm_parameters, only: allow_sink_merging
   use hydro_commons
   use sink_feedback_parameters
   use constants, only: twopi, M_sun, yr2sec
@@ -2004,7 +2005,7 @@ subroutine update_sink(ilevel)
                  merge_flag=merge_flag .and. (iyoung .or. jyoung)
               end if
 
-              if (merge_flag.eqv..true.)then
+              if (allow_sink_merging .and. merge_flag.eqv..true.)then
 
                  if(myid==1)then
                     write(*,*)'> Merging sink ',idsink(jsink),' into sink ',idsink(isink)
@@ -2168,15 +2169,323 @@ subroutine update_sink_hold(ilevel)
   use pm_commons
   implicit none
   integer::ilevel
+  integer::isink,lev
+
+  ! Build PM/PIC+gas acceleration for all sinks from fsink_partial
+  fsink(1:nsink,1:ndim)=0.0d0
+  do isink=1,nsink
+     if(msink(isink)>0.0)then
+        do lev=levelmin,nlevelmax
+           fsink(isink,1:ndim)=fsink(isink,1:ndim)+fsink_partial(isink,1:ndim,lev)
+        end do
+        if (.not. direct_force_sink(isink))then
+           fsink(isink,1:ndim)=fsink(isink,1:ndim)/dble(ncloud_sink)
+        end if
+     end if
+  end do
+
+  call hold_prepare_clean_field(ilevel)
+  call hold_build_interpolated_force_samples(ilevel)
+
+  hold_mask = .true.
+  call hold_evolve(hold_mask, dtnew(ilevel))
+
+end subroutine update_sink_hold
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_prepare_clean_field(ilevel)
+  ! Copy f → f_hold for cells at ilevel, then subtract the Plummer
+  ! contribution that f_gas_sink deposited for each direct-force sink.
+  ! After this, f_hold contains the Poisson (gas/DM) field only.
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  use constants, only: twopi
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer ::igrid,ngrid,ncache,i,ind,iskip,ix,iy,iz,isink
+  integer ::nx_loc,idim
+  real(dp)::dx,dx_loc,scale,dx_min,factG
+  real(dp),dimension(1:twotondim,1:ndim)::xc
+  real(dp),dimension(1:ndim)::skip_loc
+  integer ,dimension(1:nvector)::ind_grid,ind_cell
+  real(dp),dimension(1:nvector,1:ndim)::xx,ff
+  real(dp),dimension(1:nvector)::d2,denom
+  logical ,dimension(1:ndim)::period
+
+#if NDIM==3
+
+  factG=1d0
+  if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  skip_loc=(/0.0d0,0.0d0,0.0d0/)
+  skip_loc(1)=dble(icoarse_min)
+  skip_loc(2)=dble(jcoarse_min)
+  skip_loc(3)=dble(kcoarse_min)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx_min=scale*0.5D0**nlevelmax_sink/aexp
+
+  do ind=1,twotondim
+     iz=(ind-1)/4
+     iy=(ind-1-4*iz)/2
+     ix=(ind-1-2*iy-4*iz)
+     xc(ind,1)=(dble(ix)-0.5D0)*dx
+     xc(ind,2)=(dble(iy)-0.5D0)*dx
+     xc(ind,3)=(dble(iz)-0.5D0)*dx
+  end do
+
+  period(1)=(nx==1)
+  period(2)=(ny==1)
+  period(3)=(nz==1)
+
+  ncache=active(ilevel)%ngrid
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell(i)=iskip+ind_grid(i)
+        end do
+
+        ! Copy f → f_hold
+        do idim=1,ndim
+           do i=1,ngrid
+              f_hold(ind_cell(i),idim)=f(ind_cell(i),idim)
+           end do
+        end do
+
+        ! Subtract each direct-force sink's Plummer contribution
+        do isink=1,nsink
+           if(.not. direct_force_sink(isink))cycle
+           if(msink(isink)<=0.0d0)cycle
+
+           do idim=1,ndim
+              do i=1,ngrid
+                 xx(i,idim)=(xg(ind_grid(i),idim)+xc(ind,idim)-skip_loc(idim))*scale
+              end do
+           end do
+
+           d2=0d0
+           do idim=1,ndim
+              do i=1,ngrid
+                 ff(i,idim)=xsink(isink,idim)-xx(i,idim)
+                 if(period(idim))then
+                    if(ff(i,idim)>0.5d0*boxlen)ff(i,idim)=ff(i,idim)-boxlen
+                    if(ff(i,idim)<-0.5d0*boxlen)ff(i,idim)=ff(i,idim)+boxlen
+                 end if
+                 d2(i)=d2(i)+ff(i,idim)**2
+              end do
+           end do
+
+           do i=1,ngrid
+              denom(i)=(ssoft**2+d2(i))**(-1.5d0)
+           end do
+
+           do i=1,ngrid
+              ff(i,1:ndim)=denom(i)*ff(i,1:ndim)
+           end do
+
+           do i=1,ngrid
+              f_hold(ind_cell(i),1:ndim)=f_hold(ind_cell(i),1:ndim) &
+                   -factG*msink(isink)*ff(i,1:ndim)
+           end do
+        end do ! end loop over sinks
+     end do ! end loop over cells in grid
+  end do ! end loop over grids
+
+#endif
+
+end subroutine hold_prepare_clean_field
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_build_interpolated_force_samples(ilevel)
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::icpu,ncache,istart,igrid,jgrid,ipart,jpart,next_part,npart1
+  integer::ig,ip,isink
+  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
+
+  hold_interp_count(1:nsink)=0
+  hold_interp_valid(1:nsink)=.false.
+
+  if(numbtot(1,ilevel)==0)return
+
+  do icpu=1,ncpu+nboundary
+     if(icpu<=ncpu)then
+        ncache=numbl(icpu,ilevel)
+        istart=headl(icpu,ilevel)
+     else
+        ncache=numbb(icpu-ncpu,ilevel)
+        istart=headb(icpu-ncpu,ilevel)
+     end if
+     igrid=istart
+     ig=0
+     ip=0
+     do jgrid=1,ncache
+        npart1=numbp(igrid)
+        if(npart1>0)then
+           ig=ig+1
+           ind_grid(ig)=igrid
+           ipart=headp(igrid)
+           do jpart=1,npart1
+              next_part=nextp(ipart)
+              if(ig==0)then
+                 ig=1
+                 ind_grid(ig)=igrid
+              end if
+              if(is_cloud(typep(ipart)))then
+                 isink=-idp(ipart)
+                 if(isink>=1 .and. isink<=nsink)then
+                    if(msink(isink)>0.0d0)then
+                       ip=ip+1
+                       ind_part(ip)=ipart
+                       ind_grid_part(ip)=ig
+                       if(ip==nvector)then
+                          call hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+                          ip=0
+                          ig=0
+                       end if
+                    end if
+                 end if
+              end if
+              ipart=next_part
+           end do
+        end if
+        igrid=next(igrid)
+     end do
+     if(ip>0)then
+        call hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+     end if
+  end do
+
+  do isink=1,nsink
+     if(msink(isink)>0.0d0)then
+        hold_interp_valid(isink)=(hold_interp_count(isink)>0)
+     end if
+  end do
+end subroutine hold_build_interpolated_force_samples
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_accumulate_interp_samples_np(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+  use amr_commons
+  use pm_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ng,np,ilevel
+  integer,dimension(1:nvector),intent(in)::ind_grid,ind_part,ind_grid_part
+  integer::j,ind,idim,isink,slot
+  real(dp)::ff(1:ndim)
+  real(dp),dimension(1:nvector,1:ndim),save::xpart
+  integer ,dimension(1:nvector,1:twotondim),save::indp
+  real(dp),dimension(1:nvector,1:ndim,1:twotondim)::xx
+  real(dp),dimension(1:nvector,1:twotondim)::vol
+  logical,dimension(1:nvector,1:twotondim)::ok
+
+  do idim=1,ndim
+     do j=1,np
+        xpart(j,idim)=xp(ind_part(j),idim)
+     end do
+  end do
+
+  call cic_get_cells(indp,xx,vol,ok,ind_grid,xpart,ind_grid_part,ng,np,ilevel)
+
+  do j=1,np
+     isink=-idp(ind_part(j))
+     if(isink<1 .or. isink>nsink)cycle
+     if(msink(isink)<=0.0d0)cycle
+
+     ! CIC-sample from f_hold (Plummer already subtracted at grid level)
+     ff(1:ndim)=0.0d0
+     do ind=1,twotondim
+        if(ok(j,ind))then
+           do idim=1,ndim
+              ff(idim)=ff(idim)+f_hold(indp(j,ind),idim)*vol(j,ind)
+           end do
+        end if
+     end do
+
+     slot=hold_interp_count(isink)+1
+     if(slot<=ncloud_sink)then
+        hold_interp_pos(isink,slot,1:ndim)=xpart(j,1:ndim)
+        hold_interp_force(isink,slot,1:ndim)=ff(1:ndim)
+        hold_interp_count(isink)=slot
+     end if
+  end do
+end subroutine hold_accumulate_interp_samples_np
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_interpolate_pm_force(isink,acc_pm)
+  use amr_commons
+  use pm_commons
+  implicit none
+  integer,intent(in)::isink
+  real(dp),intent(out)::acc_pm(1:ndim)
+  integer::k,n
+  real(dp)::dx(1:ndim),r2,w,wsum
+  real(dp),parameter::eps2=1.0d-24
+
+  n=hold_interp_count(isink)
+  if((.not. hold_interp_valid(isink)) .or. n<=0)then
+     acc_pm(1:ndim)=fsink(isink,1:ndim)
+     return
+  end if
+
+  ! Inverse-distance-squared weighted interpolation
+  acc_pm(1:ndim)=0.0d0
+  wsum=0.0d0
+  do k=1,n
+     dx(1:ndim)=xsink(isink,1:ndim)-hold_interp_pos(isink,k,1:ndim)
+     r2=sum(dx(1:ndim)**2)
+     w=1.0d0/(r2+eps2)
+     acc_pm(1:ndim)=acc_pm(1:ndim)+w*hold_interp_force(isink,k,1:ndim)
+     wsum=wsum+w
+  end do
+
+  if(wsum>0.0d0)then
+     acc_pm(1:ndim)=acc_pm(1:ndim)/wsum
+  else
+     acc_pm(1:ndim)=fsink(isink,1:ndim)
+  end if
+end subroutine hold_interpolate_pm_force
+!##############################################################################
+!##############################################################################
+!##############################################################################
+!##############################################################################
+subroutine hold_compute_characteristic_times()
+  use amr_commons
+  use pm_commons
+  implicit none
 
   integer::isink,jsink
   real(dp)::v_dot_r,mu,tau
   real(dp)::free_fall,free_fall_deriv,free_fall_sym
   real(dp)::fly_by,fly_by_deriv,fly_by_sym
   real(dp)::r_mag,v_mag
+  real(dp)::r_mag_safe,v_mag_safe
+  real(dp)::den_ff,den_fb
   real(dp)::factG
   real(dp)::r(1:ndim)
   real(dp)::v(1:ndim)
+  real(dp),parameter::eps=1d-12
 
   factG=1d0
   ! Commented out for now to avoid cosmo dependence
@@ -2184,44 +2493,50 @@ subroutine update_sink_hold(ilevel)
 
   hold_tsink = huge(1.0_dp)
 
-  ! Calculate characteristic time for each sink
   do isink=1,nsink
-   do jsink=isink+1,nsink
+    do jsink=isink+1,nsink
+      if (msink(isink)<=0.0d0 .or. msink(jsink)<=0.0d0) cycle
+
       r(1:ndim)=xsink(isink,1:ndim)-xsink(jsink,1:ndim)
       v(1:ndim)=vsink(isink,1:ndim)-vsink(jsink,1:ndim)
-      
+
       r_mag=norm2(r(1:ndim))
       v_mag=norm2(v(1:ndim))
+      r_mag_safe=max(r_mag,eps)
+      v_mag_safe=max(v_mag,eps)
 
       v_dot_r=dot_product(r(1:ndim),v(1:ndim))
-
       mu=msink(isink)+msink(jsink)
-      
-      free_fall=0.1*sqrt(r_mag**3/(factG*mu))
-      free_fall_deriv = (3 * v_dot_r)*free_fall/(2 * (r_mag ** 2))
+      if (mu<=0.0d0) cycle
 
-      fly_by = 0.1 * r_mag / v_mag
-      fly_by_deriv = (v_dot_r / (r_mag * r_mag)) * fly_by * (1 + factG * mu / (v_mag * v_mag * r_mag))
+      free_fall=0.1d0*sqrt((r_mag_safe**3)/(factG*mu))
+      free_fall_deriv=(3.0d0*v_dot_r)*free_fall/(2.0d0*(r_mag_safe**2))
 
-      free_fall_sym = free_fall / (1 - 0.5 * free_fall_deriv)
-      fly_by_sym = fly_by / (1 - 0.5 * fly_by_deriv)
+      fly_by=0.1d0*r_mag_safe/v_mag_safe
+      fly_by_deriv=(v_dot_r/(r_mag_safe*r_mag_safe))*fly_by * &
+           (1.0d0 + factG*mu/(v_mag_safe*v_mag_safe*r_mag_safe))
 
-      tau = min(abs(free_fall_sym), abs(fly_by_sym))
+      den_ff=1.0d0-0.5d0*free_fall_deriv
+      den_fb=1.0d0-0.5d0*fly_by_deriv
+      if (den_ff>eps) then
+        free_fall_sym=free_fall/den_ff
+      else
+        free_fall_sym=free_fall
+      end if
+      if (den_fb>eps) then
+        fly_by_sym=fly_by/den_fb
+      else
+        fly_by_sym=fly_by
+      end if
 
-      hold_tsink(isink) = min(hold_tsink(isink), tau)
-      hold_tsink(jsink) = min(hold_tsink(jsink), tau)
-   end do
+      tau=min(free_fall_sym,fly_by_sym)
+      if (.not.(tau>0.0d0) .or. tau/=tau) tau=huge(1.0_dp)
+
+      hold_tsink(isink)=min(hold_tsink(isink),tau)
+      hold_tsink(jsink)=min(hold_tsink(jsink),tau)
+    end do
   end do
-  
-  ! Print all characteristic times for each sink
-   ! do isink=1,nsink
-   ! write(*,*)'Sink ',isink,': ',hold_tsink(isink)
-   ! end do
-
-  hold_mask = .true.
-  call hold_evolve(hold_mask, dtnew(ilevel))
-
-end subroutine update_sink_hold
+end subroutine hold_compute_characteristic_times
 !##############################################################################
 !##############################################################################
 !##############################################################################
@@ -2237,10 +2552,11 @@ recursive subroutine hold_evolve(mask, pivot_dt)
   logical::fast_mask(nsink)
 
   integer::isink
-  real(dp)::dt
 
   slow_mask=.false.
   fast_mask=.false.
+
+  call hold_compute_characteristic_times()
 
   do isink=1,nsink
     slow_mask(isink)=mask(isink) .and. (hold_tsink(isink)>=pivot_dt)
@@ -2250,15 +2566,15 @@ recursive subroutine hold_evolve(mask, pivot_dt)
   ! Base case: all particles are slow
   if (.not. any(fast_mask)) then
     call hold_drift(mask, pivot_dt/2.0)
-    call hold_kick(mask, mask, pivot_dt)
+    call hold_kick(mask, mask, pivot_dt, .true.)
     call hold_drift(mask, pivot_dt/2.0)
   ! Recurse if there are fast particles
   else
     call hold_evolve(fast_mask, pivot_dt/2.0)
     call hold_drift(slow_mask, pivot_dt/2.0)
-    call hold_kick(slow_mask, slow_mask, pivot_dt)
-    call hold_kick(slow_mask, fast_mask, pivot_dt)
-    call hold_kick(fast_mask, slow_mask, pivot_dt)  ! fast receives force from slow
+    call hold_kick(slow_mask, slow_mask, pivot_dt, .true.)
+    call hold_kick(slow_mask, fast_mask, pivot_dt, .false.)
+    call hold_kick(fast_mask, slow_mask, pivot_dt, .false.)  ! fast receives force from slow
     call hold_drift(slow_mask, pivot_dt/2.0)
     call hold_evolve(fast_mask, pivot_dt/2.0)
   endif
@@ -2286,41 +2602,48 @@ end subroutine hold_drift
 !##############################################################################
 !##############################################################################
 !##############################################################################
-subroutine hold_kick(object_mask, source_mask, dt)
+subroutine hold_kick(object_mask, source_mask, dt, include_pm)
   ! Kicks the object mask particles with the source mask particles
   use amr_commons
   use pm_commons
   implicit none
   logical,intent(in)::object_mask(nsink)
   logical,intent(in)::source_mask(nsink)
+  logical,intent(in)::include_pm
   real(dp),intent(in)::dt
 
-  integer::isink,jsink,idim,i
+  integer::isink,jsink
   real(dp)::r_mag,f_mag,f_vec(1:ndim),r(1:ndim)
   real(dp)::factG
+  real(dp)::acc_pm(1:ndim)
+  real(dp)::acc_nb(1:ndim)
 
   factG=1.0d0
   ! if(cosmo)factG=3d0/4d0/twopi*omega_m*aexp
 
-  fsink=0.0d0
-
+  ! Compute direct N-body contribution between direct-force sinks
   do isink=1,nsink
-    if (object_mask(isink)) then
+    if (.not. object_mask(isink)) cycle
+
+    acc_pm(1:ndim)=0.0d0
+    if (include_pm) call hold_interpolate_pm_force(isink,acc_pm)
+
+    acc_nb(1:ndim)=0.0d0
+    if (object_mask(isink) .and. direct_force_sink(isink)) then
       do jsink=1,nsink
-        if (source_mask(jsink).and.(isink.ne.jsink)) then
+        if (source_mask(jsink).and.direct_force_sink(jsink).and.(isink.ne.jsink)) then
           r(1:ndim) = xsink(jsink,1:ndim)-xsink(isink,1:ndim)
           r_mag = norm2(r(1:ndim))
           if (r_mag < 1d-10) cycle
           f_mag = factG * msink(jsink) / r_mag**2
           f_vec(1:ndim) = f_mag * (r(1:ndim) /r_mag)
-          fsink(isink,1:ndim) = fsink(isink,1:ndim) + f_vec(1:ndim)
+          acc_nb(1:ndim) = acc_nb(1:ndim) + f_vec(1:ndim)
         end if
       end do
     end if
-    if (verbose) then
-      write(*,*)'Acceleration on Sink ',isink,': ',fsink(isink,1:ndim)
-    end if
-    vsink(isink,1:ndim) = vsink(isink,1:ndim) + fsink(isink,1:ndim) * dt
+
+    ! Apply total acceleration: optional PM/PIC+gas term plus direct N-body term.
+    vsink(isink,1:ndim) = vsink(isink,1:ndim) + (acc_pm(1:ndim)+acc_nb(1:ndim)) * dt
   end do
 end subroutine hold_kick
 !##############################################################################
@@ -2841,7 +3164,7 @@ subroutine read_sink_params()
   namelist/sink_params/n_sink,rho_sink,d_sink,accretion_scheme,sink_sink_integrator,merging_timescale,&
        ir_cloud_massive,sink_soft,mass_sink_direct_force,ir_cloud,nsinkmax,create_sinks,&
        check_energies,mass_sink_seed,mass_smbh_seed,c_acc,nlevelmax_sink,&
-       eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,&
+       eddington_limit,eddington_cap,acc_sink_boost,mass_merger_vel_check,allow_sink_merging,&
        clump_core,verbose_AGN,T2_AGN,T2_min,cone_opening,mass_halo_AGN,mass_clump_AGN,mass_star_AGN,&
        AGN_fbk_frac_ener,AGN_fbk_frac_mom,T2_max,v_max,boost_threshold_density,&
        epsilon_kin,AGN_fbk_mode_switch_threshold,kin_mass_loading,bondi_use_vrel,smbh,agn,max_mass_nsc,&

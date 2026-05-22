@@ -292,6 +292,17 @@ subroutine init_sink
   ! Compute number of cloud particles within sink sphere
   call compute_ncloud_sink
 
+  ! HOLD interpolation buffers: one force sample per cloud particle.
+  allocate(hold_interp_pos(1:nsinkmax,1:ncloud_sink,1:ndim))
+  allocate(hold_interp_force(1:nsinkmax,1:ncloud_sink,1:ndim))
+  allocate(hold_interp_count(1:nsinkmax))
+  allocate(hold_interp_valid(1:nsinkmax))
+  hold_interp_pos=0d0; hold_interp_force=0d0
+  hold_interp_count=0; hold_interp_valid=.false.
+  ! Grid-level copy of f with direct-force Plummer contributions removed
+  allocate(f_hold(1:ncoarse+twotondim*ngridmax,1:ndim))
+  f_hold=0d0
+
   ! Output sink properties to screen
   if (myid==1.and.nsink-nsinkold>0)then
      write(*,*)'sinks read from file '//filename
